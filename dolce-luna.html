@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
-  <title>Dolce Luna</title>
+  <title>🌙 Dolce Luna</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌙</text></svg>"/>
   <style>
 /* Fichas Técnicas mobile fix */
@@ -7261,17 +7261,30 @@ function ProdutosTab({ bancoCnpj = {} }) {
       const grupos = fichaGrupos[prod.id];
       return Object.keys(grupos).map(grupo => {
         const selecionado = todosItens.find(i => i.grupo === grupo);
+        const opcoes = grupos[grupo] || [];
         return (
           <tr key={"combo-sub-"+prod.id+"-"+grupo}
             style={{ background:"#080612" }}>
-            <td style={{ ...tdS({ paddingLeft:28, fontSize:10, color:"#4a3f60",
+            <td style={{ ...tdS({ paddingLeft:28, paddingTop:6, paddingBottom:6, fontSize:10, color:"#4a3f60",
               fontStyle:"italic", borderBottom:"none", position:"sticky", left:0,
-              background:"#080612", whiteSpace:"nowrap" }) }}>
-              ▸ {grupo}
-              {selecionado
-                ? <span style={{ color:"#818cf8", marginLeft:6 }}>{selecionado.refNome}</span>
-                : <span style={{ color:"#2d2640", marginLeft:6 }}>—</span>
-              }
+              background:"#080612" }) }}>
+              <div style={{ whiteSpace:"nowrap" }}>
+                📂 {grupo}
+                {selecionado
+                  ? <span style={{ color:"#818cf8", marginLeft:6, fontStyle:"normal" }}>→ {selecionado.refNome}</span>
+                  : <span style={{ color:"#2d2640", marginLeft:6 }}>— nenhuma venda registrada</span>
+                }
+              </div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginTop:4 }}>
+                {opcoes.map(op => (
+                  <span key={op.id} style={{
+                    padding:"2px 8px", borderRadius:20, fontSize:9, fontStyle:"normal",
+                    background: selecionado?.refProdId===op.id ? "#7c3aed" : "#1a1530",
+                    color: selecionado?.refProdId===op.id ? "#fff" : "#818cf8",
+                    border:"1px solid #2d2640", whiteSpace:"nowrap"
+                  }}>{op.nome}</span>
+                ))}
+              </div>
             </td>
             {modoDiario ? dias.map(d => <td key={d} style={{ ...tdS({ borderBottom:"none" }) }} />) : canais.map(c => <td key={c.id} style={{ ...tdS({ borderBottom:"none" }) }} />)}
             <td style={{ ...tdS({ borderBottom:"none" }) }} />
