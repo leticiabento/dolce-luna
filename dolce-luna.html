@@ -1432,7 +1432,8 @@ function FichasTecnicasTab({ insumos = [], receitas = [] }) {
         subcategoria: null,
         nome: nom,
         porcoes: 1,
-        preco_venda: Number(novoForm.preco_venda) || 0
+        preco_venda: Number(novoForm.preco_venda) || 0,
+        eh_combo: true
       });
       if (!combo) return;
 
@@ -1476,7 +1477,7 @@ function FichasTecnicasTab({ insumos = [], receitas = [] }) {
     // Se tem id = modo edição (PATCH), senão criação (POST via _addProduto)
     if (novoForm.id) {
       try {
-        const payload = { categoria: cat, subcategoria: sub, nome: nom, porcoes: Number(novoForm.porcoes)||1 };
+        const payload = { categoria: cat, subcategoria: sub, nome: nom, porcoes: Number(novoForm.porcoes)||1, eh_combo: !!novoForm.eh_combo };
         const r = await fetch(`${SB_URL}/catalogo_produtos?id=eq.${novoForm.id}`, {
           method: "PATCH", headers: { ...SB_H, "Prefer": "return=representation" },
           body: JSON.stringify(payload)
@@ -2489,6 +2490,16 @@ function FichasTecnicasTab({ insumos = [], receitas = [] }) {
                     placeholder="Ex: Cookie S'mores" style={{ ...selS, width:"100%" }}
                     onKeyDown={e=>{ if(e.key==="Enter") criarProduto(); }} />
                 </div>
+                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer",
+                  padding:"10px 12px", borderRadius:8, border:"1px solid #2d2640",
+                  background: novoForm.eh_combo ? "#2d1254" : "#0d0b15" }}>
+                  <input type="checkbox" checked={!!novoForm.eh_combo}
+                    onChange={e=>setNovoForm(f=>({...f,eh_combo:e.target.checked}))}
+                    style={{ width:16, height:16, cursor:"pointer" }} />
+                  <span style={{ fontSize:12, color: novoForm.eh_combo ? "#c084fc" : "#8a7fa0", fontWeight:600 }}>
+                    🎁 Este produto é um combo
+                  </span>
+                </label>
               </div>
               <div style={{ display:"flex", gap:8, marginTop:16 }}>
                 <button onClick={criarProduto}
@@ -6425,7 +6436,7 @@ function ProdutosTab({ bancoCnpj = {} }) {
     setCanais(Array.isArray(chans) ? chans : []);
     if (Array.isArray(chans) && chans.length > 0) setCanalDiarioId(prev => prev || chans[0].id);
     // Fetch ficha_tecnica p/ combos (produtos com ref_produto_id)
-    // Detecta combos via ficha_tecnica (todos itens com ref_produto_id)
+    // Detecta combos: 1) marcados explicitamente (eh_combo=true) 2) fallback por heurística
     try {
       const allProdIds = prodList.map(p=>p.id).join(',');
       setDebugInfo(`buscando fichas para ${prodList.length} produtos...`);
@@ -6439,22 +6450,28 @@ function ProdutosTab({ bancoCnpj = {} }) {
           if (!porProd[f.produto_id]) porProd[f.produto_id] = [];
           porProd[f.produto_id].push(f);
         });
-        // Combo = produto onde TODOS os itens têm ref_produto_id
-        const comboIds = Object.keys(porProd).filter(id =>
-          porProd[id].length > 0 && porProd[id].every(f => f.ref_produto_id)
+        // Combo = produto marcado explicitamente (eh_combo=true) OU, por
+        // compatibilidade, produto com pelo menos um item referenciando outro produto
+        const combosExplicitos = prodList.filter(p => p.eh_combo).map(p => String(p.id));
+        const combosPorHeuristica = Object.keys(porProd).filter(id =>
+          porProd[id].length > 0 && porProd[id].some(f => f.ref_produto_id)
         );
+        const comboIds = [...new Set([...combosExplicitos, ...combosPorHeuristica])];
         if (comboIds.length > 0) {
-          const refIds = [...new Set(comboIds.flatMap(id => porProd[id].map(f=>f.ref_produto_id)))].filter(Boolean);
-          const rRef = await fetch(`${SB_URL}/catalogo_produtos?id=in.(${refIds.join(',')})&select=id,nome,subcategoria`, { headers: SB_H });
-          const refProds = await rRef.json();
+          const refIds = [...new Set(comboIds.flatMap(id => (porProd[id]||[]).map(f=>f.ref_produto_id)))].filter(Boolean);
+          const refProds = refIds.length > 0
+            ? await (await fetch(`${SB_URL}/catalogo_produtos?id=in.(${refIds.join(',')})&select=id,nome,subcategoria,categoria`, { headers: SB_H })).json()
+            : [];
           const grupos = {};
           comboIds.forEach(pid => {
             grupos[pid] = {};
-            porProd[pid].forEach(f => {
+            (porProd[pid]||[]).forEach(f => {
+              if (!f.ref_produto_id) return; // ignora insumos diretos (ex: embalagem)
               const rp = (refProds||[]).find(x => x.id === f.ref_produto_id);
-              const grupo = rp?.subcategoria || 'Outros';
+              if (!rp) return;
+              const grupo = rp.subcategoria || rp.categoria || 'Outros';
               if (!grupos[pid][grupo]) grupos[pid][grupo] = [];
-              if (rp && !grupos[pid][grupo].find(x=>x.id===rp.id))
+              if (!grupos[pid][grupo].find(x=>x.id===rp.id))
                 grupos[pid][grupo].push({ id: rp.id, nome: rp.nome });
             });
           });
@@ -6475,7 +6492,7 @@ function ProdutosTab({ bancoCnpj = {} }) {
         (vciData||[]).forEach(v => {
           const k = `${v.produto_id}-${v.canal_id}-${v.mes_referencia}${v.dia!=null?'-'+v.dia:''}`;
           if (!vciMap[k]) vciMap[k] = [];
-          vciMap[k].push({ grupo: v.grupo, refProdId: v.ref_produto_id, refNome: v.ref_produto_nome });
+          vciMap[k].push({ grupo: v.grupo, refProdId: v.ref_produto_id, refNome: v.ref_produto_nome, quantidade: v.quantidade });
         });
         setVendaComboItens(vciMap);
       }
@@ -6514,6 +6531,35 @@ function ProdutosTab({ bancoCnpj = {} }) {
   };
   const totalPorProduto = (prodId) => canais.reduce((s, c) => s + getQtd(prodId, c.id), 0);
   const totalPorCanal = (canalId, prodList) => prodList.reduce((s, p) => s + getQtd(p.id, canalId), 0);
+
+  // Quantidade vendida de uma opção específica de um grupo do combo, num dia/canal
+  const getQtdComboItem = (prodId, canalId, dia, refProdId) => {
+    const k = `${prodId}-${canalId}-${mesRef}${dia!=null?'-'+dia:''}`;
+    const item = (vendaComboItens[k]||[]).find(i => i.refProdId === refProdId);
+    return item ? Number(item.quantidade)||0 : 0;
+  };
+  // Salva a quantidade vendida de uma opção específica (independente das outras opções do mesmo grupo)
+  const salvarComboItemQtd = async (prodId, canalId, mesR, dia, grupo, refProdId, refNome, novaQtd) => {
+    const qtdNum = Number(novaQtd) || 0;
+    const k = `${prodId}-${canalId}-${mesR}${dia!=null?'-'+dia:''}`;
+    setVendaComboItens(prev => {
+      const arr = (prev[k]||[]).filter(i => i.refProdId !== refProdId);
+      if (qtdNum > 0) arr.push({ grupo, refProdId, refNome, quantidade: qtdNum });
+      return { ...prev, [k]: arr };
+    });
+    try {
+      const diaF = dia != null ? `&dia=eq.${dia}` : '&dia=is.null';
+      await fetch(`${SB_URL}/vendas_combo_itens?produto_id=eq.${prodId}&canal_id=eq.${canalId}&mes_referencia=eq.${mesR}${diaF}&ref_produto_id=eq.${refProdId}`, {
+        method:'DELETE', headers: SB_H
+      });
+      if (qtdNum > 0) {
+        await fetch(`${SB_URL}/vendas_combo_itens`, {
+          method:'POST', headers:{ ...SB_H, 'Prefer':'return=minimal' },
+          body: JSON.stringify([{ venda_id:0, produto_id:prodId, canal_id:canalId, mes_referencia:mesR, dia: dia!=null?dia:null, grupo, ref_produto_id:refProdId, ref_produto_nome:refNome, quantidade:qtdNum }])
+        });
+      }
+    } catch(e) { console.warn('salvarComboItemQtd:', e); }
+  };
 
   // Salva os itens escolhidos em um combo
   const salvarComboItens = async (prodId, canalId, mesR, dia, vendaId, selecoes) => {
@@ -6645,9 +6691,9 @@ function ProdutosTab({ bancoCnpj = {} }) {
     setNovoModal(null); setNovoForm({});
   };
   const salvarEditProduto = async () => {
-    const { id, nome, categoria, subcategoria } = editModal.item;
-    await fetch(`${SB_URL}/catalogo_produtos?id=eq.${id}`, { method:"PATCH", headers:{...SB_H,"Prefer":"return=minimal"}, body: JSON.stringify({ nome, categoria, subcategoria: subcategoria||null }) });
-    setProdutos(prev => prev.map(p => p.id===id ? {...p, nome, categoria, subcategoria} : p));
+    const { id, nome, categoria, subcategoria, eh_combo } = editModal.item;
+    await fetch(`${SB_URL}/catalogo_produtos?id=eq.${id}`, { method:"PATCH", headers:{...SB_H,"Prefer":"return=minimal"}, body: JSON.stringify({ nome, categoria, subcategoria: subcategoria||null, eh_combo: !!eh_combo }) });
+    setProdutos(prev => prev.map(p => p.id===id ? {...p, nome, categoria, subcategoria, eh_combo: !!eh_combo} : p));
     setEditModal(null);
   };
   const salvarEditCanal = async () => {
@@ -6722,6 +6768,7 @@ function ProdutosTab({ bancoCnpj = {} }) {
     {produtos.length} produtos · {canais.length} canais ·
     Total geral: <strong style={{color:"#f0e8ff"}}>{totalGeral()} unid</strong>
     </div>
+    <div style={{ fontSize:9, color:"#4a3f60", marginTop:2, fontStyle:"italic" }}>{debugInfo} · build v2025-09-15-e</div>
     {ultimoUpdate && (
     <div style={{ marginTop:5, display:"inline-flex", alignItems:"center", gap:6,
     background:"#0d1a0d", border:"1px solid #166534", borderRadius:6, padding:"3px 10px",
@@ -7068,6 +7115,90 @@ function ProdutosTab({ bancoCnpj = {} }) {
                       </td>
                     </tr>
                   );
+
+                  // Sublinhas de itens de combo — cada opção vira uma linha editável por dia
+                  if (fichaGrupos[prod.id] && Object.keys(fichaGrupos[prod.id]).length > 0) {
+                    const grupos = fichaGrupos[prod.id];
+                    Object.keys(grupos).forEach(grupo => {
+                      const opcoes = grupos[grupo] || [];
+                      rows.push(
+                        <tr key={"combo-grupo-d-"+prod.id+"-"+grupo} style={{ background:"#0d0b15" }}>
+                          <td colSpan={dias.length + 2} style={{ padding:"6px 14px 2px 32px",
+                            fontSize:9, color:"#4a3f60", fontStyle:"italic", fontWeight:700,
+                            position:"sticky", left:0, background:"#0d0b15" }}>
+                            📂 {grupo}
+                          </td>
+                        </tr>
+                      );
+                      opcoes.forEach(op => {
+                        const totalOp = visaoGeral
+                          ? canais.reduce((s,c)=> s + dias.reduce((ss,d)=> ss + getQtdComboItem(prod.id, c.id, d, op.id), 0), 0)
+                          : dias.reduce((s,d)=> s + getQtdComboItem(prod.id, canalDiarioId, d, op.id), 0);
+                        rows.push(
+                          <tr key={"combo-item-d-"+prod.id+"-"+grupo+"-"+op.id} style={{ background:"#080612" }}>
+                            <td style={{ padding:"3px 14px 3px 44px", fontSize:10, color:"#818cf8",
+                              position:"sticky", left:0, background:"#080612",
+                              borderBottom:"1px solid #1e1a2e", whiteSpace:"nowrap" }}>
+                              {op.nome}
+                            </td>
+                            {dias.map(d => {
+                              const qtdAtual = visaoGeral
+                                ? canais.reduce((s,c)=> s + getQtdComboItem(prod.id, c.id, d, op.id), 0)
+                                : getQtdComboItem(prod.id, canalDiarioId, d, op.id);
+                              const editKey = `ci-${prod.id}-${canalDiarioId}-${d}-${op.id}`;
+                              const inputVal = localEdit[editKey] !== undefined
+                                ? localEdit[editKey]
+                                : (visaoGeral ? "" : (qtdAtual || ""));
+                              const colBg = d%2===0 ? "#100e1b" : "#0d0b15";
+                              return (
+                                <td key={d} style={tdD({
+                                  background: qtdAtual > 0 ? "#0a1a0a" : colBg,
+                                  padding:"2px", borderBottom:"1px solid #1e1a2e" })}>
+                                  {visaoGeral ? (
+                                    <div style={{ textAlign:"center", fontSize:10, padding:"3px 2px",
+                                      color: qtdAtual>0?"#818cf8":"#2d2640" }}>
+                                      {qtdAtual > 0 ? qtdAtual : "—"}
+                                    </div>
+                                  ) : (
+                                    <input type="number" min="0" step="1"
+                                      value={inputVal}
+                                      onChange={e => setLocalEdit(le=>({...le,[editKey]:e.target.value}))}
+                                      onFocus={e=>{ setLocalEdit(le=>({...le,[editKey]:qtdAtual||""})); e.target.select(); }}
+                                      onBlur={e=>{
+                                        const val = e.target.value;
+                                        if (val !== "" && Number(val) !== qtdAtual) {
+                                          salvarComboItemQtd(prod.id, canalDiarioId, mesRef, d, grupo, op.id, op.nome, val);
+                                        }
+                                        setLocalEdit(le=>{const n={...le};delete n[editKey];return n;});
+                                      }}
+                                      onKeyDown={e=>{
+                                        if(e.key==="Enter"||e.key==="Tab"){
+                                          const val=e.target.value;
+                                          if(val!==""&&Number(val)!==qtdAtual)
+                                            salvarComboItemQtd(prod.id, canalDiarioId, mesRef, d, grupo, op.id, op.nome, val);
+                                          setLocalEdit(le=>{const n={...le};delete n[editKey];return n;});
+                                        }
+                                        if(e.key==="Escape")
+                                          setLocalEdit(le=>{const n={...le};delete n[editKey];return n;});
+                                      }}
+                                      style={{ width:"100%", minWidth:36, background:"transparent",
+                                        border:"none", textAlign:"center", fontSize:10,
+                                        outline:"none", padding:"3px 2px",
+                                        color: qtdAtual>0?"#818cf8":"#3a3060" }}
+                                    />
+                                  )}
+                                </td>
+                              );
+                            })}
+                            <td style={tdD({ fontWeight:600, fontSize:10,
+                              color: totalOp>0?"#818cf8":"#2d2640" })}>
+                              {totalOp > 0 ? totalOp : "—"}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    });
+                  }
                 });
                 return rows;
               })()}
@@ -7252,45 +7383,65 @@ function ProdutosTab({ bancoCnpj = {} }) {
     {totP > 0 ? totP : "—"}
     </td>
     </tr>
-    {/* Sublinhas de itens de combo */}
+    {/* Sublinhas de itens de combo — cada opção editável por canal (mês) */}
     {fichaGrupos[prod.id] && Object.keys(fichaGrupos[prod.id]).length > 0 && (()=>{
-      // Pega itens de qualquer canal registrado
-      const todosItens = Object.entries(vendaComboItens)
-        .filter(([k]) => k.startsWith(`${prod.id}-`))
-        .flatMap(([,v]) => v);
       const grupos = fichaGrupos[prod.id];
-      return Object.keys(grupos).map(grupo => {
-        const selecionado = todosItens.find(i => i.grupo === grupo);
+      const linhas = [];
+      Object.keys(grupos).forEach(grupo => {
         const opcoes = grupos[grupo] || [];
-        return (
-          <tr key={"combo-sub-"+prod.id+"-"+grupo}
-            style={{ background:"#080612" }}>
-            <td style={{ ...tdS({ paddingLeft:28, paddingTop:6, paddingBottom:6, fontSize:10, color:"#4a3f60",
-              fontStyle:"italic", borderBottom:"none", position:"sticky", left:0,
-              background:"#080612" }) }}>
-              <div style={{ whiteSpace:"nowrap" }}>
-                📂 {grupo}
-                {selecionado
-                  ? <span style={{ color:"#818cf8", marginLeft:6, fontStyle:"normal" }}>→ {selecionado.refNome}</span>
-                  : <span style={{ color:"#2d2640", marginLeft:6 }}>— nenhuma venda registrada</span>
-                }
-              </div>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginTop:4 }}>
-                {opcoes.map(op => (
-                  <span key={op.id} style={{
-                    padding:"2px 8px", borderRadius:20, fontSize:9, fontStyle:"normal",
-                    background: selecionado?.refProdId===op.id ? "#7c3aed" : "#1a1530",
-                    color: selecionado?.refProdId===op.id ? "#fff" : "#818cf8",
-                    border:"1px solid #2d2640", whiteSpace:"nowrap"
-                  }}>{op.nome}</span>
-                ))}
-              </div>
+        linhas.push(
+          <tr key={"combo-grupo-"+prod.id+"-"+grupo} style={{ background:"#0d0b15" }}>
+            <td style={{ ...tdS({ paddingLeft:28, paddingTop:6, paddingBottom:2, fontSize:9, color:"#4a3f60",
+              fontStyle:"italic", fontWeight:700, borderBottom:"none", position:"sticky", left:0,
+              background:"#0d0b15" }) }}>
+              📂 {grupo}
             </td>
-            {modoDiario ? dias.map(d => <td key={d} style={{ ...tdS({ borderBottom:"none" }) }} />) : canais.map(c => <td key={c.id} style={{ ...tdS({ borderBottom:"none" }) }} />)}
-            <td style={{ ...tdS({ borderBottom:"none" }) }} />
+            {canais.map(c => <td key={c.id} style={{ ...tdS({ borderBottom:"none", background:"#0d0b15" }) }} />)}
+            <td style={{ ...tdS({ borderBottom:"none", background:"#0d0b15" }) }} />
           </tr>
         );
+        opcoes.forEach(op => {
+          const totalOp = canais.reduce((s,c)=> s + getQtdComboItem(prod.id, c.id, null, op.id), 0);
+          linhas.push(
+            <tr key={"combo-item-"+prod.id+"-"+grupo+"-"+op.id} style={{ background:"#080612" }}>
+              <td style={{ ...tdS({ paddingLeft:44, fontSize:10, color:"#818cf8",
+                borderBottom:"none", position:"sticky", left:0, background:"#080612", whiteSpace:"nowrap" }) }}>
+                {op.nome}
+              </td>
+              {canais.map(c => {
+                const qtdAtual = getQtdComboItem(prod.id, c.id, null, op.id);
+                const editKey = `ci-${prod.id}-${c.id}-${op.id}`;
+                const inputVal = localEdit[editKey] !== undefined ? localEdit[editKey] : (qtdAtual || "");
+                return (
+                  <td key={c.id} style={{ ...tdS({ borderBottom:"none" }) }}>
+                    <input type="number" min="0" step="1"
+                      value={inputVal}
+                      placeholder="—"
+                      onChange={e => setLocalEdit(le=>({...le,[editKey]:e.target.value}))}
+                      onFocus={e=>{ if (localEdit[editKey] === undefined) setLocalEdit(le=>({...le,[editKey]:qtdAtual||""})); }}
+                      onBlur={e=>{
+                        const val = e.target.value;
+                        if (Number(val||0) !== qtdAtual) {
+                          salvarComboItemQtd(prod.id, c.id, mesRef, null, grupo, op.id, op.nome, val);
+                        }
+                        setLocalEdit(le=>{const n={...le};delete n[editKey];return n;});
+                      }}
+                      onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+                      style={{ width:50, textAlign:"center", background:"transparent",
+                        border:"1px solid transparent", borderRadius:4,
+                        color: qtdAtual>0?"#818cf8":"#3a3060", fontSize:11, padding:"3px 4px", outline:"none" }}
+                    />
+                  </td>
+                );
+              })}
+              <td style={{ ...tdS({ fontWeight:700, fontSize:11, color:totalOp>0?"#818cf8":"#3a3060", borderBottom:"none" }) }}>
+                {totalOp > 0 ? totalOp : "—"}
+              </td>
+            </tr>
+          );
+        });
       });
+      return linhas;
     })()}
     </React.Fragment>
     );
@@ -7642,6 +7793,16 @@ function ProdutosTab({ bancoCnpj = {} }) {
     <input value={editModal.item.nome||""} onChange={e=>setEditModal(m=>({...m,item:{...m.item,nome:e.target.value}}))}
     style={{ ...iStyle, width:"100%", fontSize:12, padding:"8px 10px" }} />
     </div>
+    <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer",
+      padding:"10px 12px", borderRadius:8, border:"1px solid #2d2640",
+      background: editModal.item.eh_combo ? "#2d1254" : "#0d0b15" }}>
+      <input type="checkbox" checked={!!editModal.item.eh_combo}
+        onChange={e=>setEditModal(m=>({...m,item:{...m.item,eh_combo:e.target.checked}}))}
+        style={{ width:16, height:16, cursor:"pointer" }} />
+      <span style={{ fontSize:12, color: editModal.item.eh_combo ? "#c084fc" : "#8a7fa0", fontWeight:600 }}>
+        🎁 Este produto é um combo
+      </span>
+    </label>
     </div>
     <div style={{ display:"flex", gap:8, marginTop:16 }}>
     <button onClick={salvarEditProduto}
